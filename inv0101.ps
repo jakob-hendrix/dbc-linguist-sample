@@ -1,0 +1,441 @@
+./*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++    Program Name  :  inv0101.ps
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+
+.# =================================================================== #
+.# Variable Includes
+.# =================================================================== #
+    INC    UTIL_COMMON.CB   ...Common variables for UTIL routines
+
+.# =================================================================== #
+.# File Declarations
+.# =================================================================== #
+W_FILE_FD           FILE    VAR=200, TEXT
+W_FILE_NAME         INIT    "/w/inv0101.temp"
+W_FILE_LIST         LIST
+W_INI_NAME          CHAR    200
+                    LISTEND
+
+LOG_FD              FILE    VAR=120, TEXT
+LOG_NAME            CHAR    100
+LOG_SEND_NAME       CHAR    100
+LOG_PREFIX          INIT    "/w/inv0101_b101_process"
+LOG_SUFFIX          INIT    ".log.csv"
+LOG_LIST            LIST
+LOG_REC             CHAR    120
+                    LISTEND
+
+.# =================================================================== #
+.# Rules Configuration
+.# =================================================================== #
+TST_ENABLE          NUM     "0"     ...set to 0 for PRD runs
+TST_NODELETE        NUM     "1"     ...preserve files between runs
+TST_LOCALPATH       INIT    "/w"
+TST_ARCHIVE         INIT    "/w/test"
+TST_SHARED          INIT    "/i/groups/it/apps/dev/temp"
+TST_WEBSITE         INIT    "/i/groups/it/apps/dev/temp/web"
+WRITE_LOG           NUM     "1"
+SEND_REPORT         NUM     "1"
+
+.# =================================================================== #
+.# Program Variables
+.# =================================================================== #
+
+... Runtime Parameters
+PARAM_LIST          LIST
+PARAM_NONE          CHAR    8
+                    LISTEND
+
+...Unix Scripts
+
+FTP_SCRIPT          INIT    "generic_mput.ftp"
+MAIL_SCRIPT         INIT    "notify.mail"
+
+
+.# =================================================================== #
+.# Begin Program - Manual Run
+.# =================================================================== #
+
+...Start here if selected from menu (RUN_MODE = "N")
+    CALL RUN_NOW
+    CHAIN C_NEXT
+
+.# =================================================================== #
+.# Begin Program - Impact Scheduler Run
+.# =================================================================== #
+
+...Start here if called by the Scheduler (RUN_MODE = "B")
+    INC SCHED_NP.SR     ...Scheduler routines (w/o printer)
+
+
+.#######################################################################
+MAIN_PROCESS LROUTINE
+    debug
+    CALL INITIALIZE
+    CALL PROCESS_FILES
+    CALL CLEAN_UP
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+INITIALIZE LROUTINE
+./* Set runtime variables and muster files in the staging area
+. */
+    CALL X_ZERO_COUNTS
+    FILL " " IN ALL_FILES,EXPORT_DIR
+    CLEAR FILE_COUNT  ...[1] CSVs ...[2] PDFs
+
+    IF (NOT C_CMDPAR)
+        CALL X_BLANK_SCREEN
+
+... Initialize Counters
+        MOVE "Total Files       :   " TO X_CNTDESC1
+        MOVE "CSV Files Found   :   " TO X_CNTDESC2
+        MOVE "CSV Files Renamed :   " TO X_CNTDESC3
+        MOVE "PDFs Found        :   " TO X_CNTDESC4
+        MOVE "Files Archived    :   " TO X_CNTDESC5
+        MOVE "Files Exported    :   " TO X_CNTDESC6
+
+        CALL X_DISPLAY_COUNTS
+        CALL UTIL_XMESSAGE USING "Gathering B101 files in staging area...",30
+    ENDIF
+
+... Set file movement directories
+    MOVE DIR_PENDING_BACKUP TO EXPORT_DIR[EXT_CSV, DIR_BACKUP]:
+                               EXPORT_DIR[EXT_PDF, DIR_BACKUP]
+    IF (TST_ENABLE)
+        MOVE TST_LOCALPATH TO SRC_DIR
+        MOVE TST_ARCHIVE TO EXPORT_DIR[EXT_CSV, DIR_ARCHIVE]:
+                            EXPORT_DIR[EXT_PDF, DIR_ARCHIVE]
+
+        MOVE TST_SHARED  TO EXPORT_DIR[EXT_CSV, DIR_SHARED]:
+                            EXPORT_DIR[EXT_PDF, DIR_SHARED]
+
+        MOVE TST_WEBSITE TO EXPORT_DIR[EXT_CSV, DIR_WEBSITE]:
+                            EXPORT_DIR[EXT_PDF, DIR_WEBSITE]
+    ELSE
+        debug ...change filepath to /w/ for ease of testing
+        MOVE FILEPATH TO SRC_DIR
+        MOVE DIR_CSV_ARCHIVE TO EXPORT_DIR[EXT_CSV, DIR_ARCHIVE]
+        MOVE DIR_PDF_ARCHIVE TO EXPORT_DIR[EXT_PDF, DIR_ARCHIVE]
+
+        MOVE DIR_CSV_SHARED  TO EXPORT_DIR[EXT_CSV, DIR_SHARED]
+        MOVE DIR_PDF_SHARED  TO EXPORT_DIR[EXT_PDF, DIR_SHARED]
+
+        MOVE DIR_CSV_WEBSITE TO EXPORT_DIR[EXT_CSV, DIR_WEBSITE]
+        MOVE DIR_PDF_WEBSITE TO EXPORT_DIR[EXT_PDF, DIR_WEBSITE]
+    ENDIF
+
+    debug
+    IF (WRITE_LOG)
+        MOVE OGB_SEQ1 TO OGB_SEQ
+        PACK LOG_NAME WITH LOG_PREFIX,LOG_SUFFIX
+        CALL PREP_OGBFILE USING LOG_FD,LOG_NAME
+        PACK LOG_REC WITH "#"File Name#",#"Action Taken#""
+        CALL WRITE_OGBREC USING LOG_FD, LOG_NAME, LOG_LIST
+    ENDIF
+
+... Set up staging area for this run
+    CALL UTIL_CREATE_DIR USING WORK_DIR
+    CALL UTIL_CREATE_DIR USING EXPORT_DIR[EXT_CSV,DIR_ARCHIVE]
+    CALL UTIL_CREATE_DIR USING EXPORT_DIR[EXT_PDF,DIR_ARCHIVE]
+
+... Fill staging area with all found files
+    IF (TST_ENABLE & TST_NODELETE)
+        PACK SCRATCH WITH "cp #"",SRC_DIR,"/#"b101* #"",WORK_DIR,"/#""
+    ELSE
+...        PACK SCRATCH WITH "mv #"",SRC_DIR,"/#"b101* #"",WORK_DIR,"/#" > /dev/null 2>&1"
+        PACK SCRATCH WITH "mv #"",SRC_DIR,"/#"b101* #"",WORK_DIR,"/#" > /w/inv0101.apjwh.log 2>&1"
+    ENDIF
+    debug
+    ROLLOUT SCRATCH
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+PROCESS_FILES LROUTINE
+./* Organize files in work dir then archive and export them for imaging
+. * and to the web
+. */
+    debug
+    CALL ORGANIZE_FILES
+    CALL MOVE_FILES
+
+    IF (SEND_REPORT)
+        CALL EMAIL_LOG
+    ENDIF
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+ORGANIZE_FILES LROUTINE
+./* Fills the work file with the name of all files of the pattern set in
+. * SRC_NAME_???. Then calls the renaming routine with the search string
+. * in SRCH_???
+. */
+
+...Actives
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_BILL
+...Retirees
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R96
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R96SV
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R97
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R97SV
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R98
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R98SV
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R99
+    CALL PROCESS_REPORT_TYPE USING SRC_NAME_R99SV
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+PROCESS_REPORT_TYPE LROUTINE PATTERN@
+./* Finds all files in the SR_DIR that matches the PATTERN@ parameter,
+. * and writes them to a work file. The file is then passed to the
+. * PROCESS_REPORTS routine
+. */
+PATTERN@          CHAR    @
+...
+    CALL UTIL_XMESSAGE USING ("Processing "+PATTERN@+" files..."),30
+    ERASE W_FILE_NAME
+    PACK SCRATCH WITH "for f in #"",WORK_DIR,"/#"",SRC_NAME_FRONT,PATTERN@,".*; do [[ -f #"${f}#" ]] && echo #"$(basename ${f})#" >> ",W_FILE_NAME,"; done"
+    ROLLOUT SCRATCH
+    RETURN IF (OVER)
+
+    CALL PROCESS_REPORTS USING PATTERN@
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+PROCESS_REPORTS LROUTINE RPT_PATTERN@
+./* For each CSV found in the work file, this appends "_CSV" to the
+. * name. Then the renamed file is passed to the FTP script. Finally,
+. * the PDF version of that same file is passed to the FTP script with
+. * the PDF option
+. */
+RPT_PATTERN@        CHAR    @
+...
+
+...Start from the beginning
+    debug
+    MOVE OGB_SEQ1 INTO OGB_SEQ
+    CALL OPEN_OGBFILE USING W_FILE_FD,W_FILE_NAME
+
+...Read work file. For each record, insert "_csv" after <agy#>
+    LOOP
+        CLEAR W_INI_NAME,W_NEW_NAME
+        CALL READ_OGBFILE USING W_FILE_FD,W_FILE_NAME,W_FILE_LIST
+        IF (OVER)
+            CALL UTIL_ERRORMSG USING "No Files Found :: Should be Impossible","PROCESS_REPORTS"
+        ENDIF
+        BREAK IF (RESULT != 1)
+
+        MOVE (WORK_DIR+"/"+W_INI_NAME) TO SCRATCH
+        EXIST SCRATCH
+        IF (OVER)
+            debug
+            CONTINUE
+        ENDIF
+
+        SCAN RPT_PATTERN@ IN W_INI_NAME
+        IF (NOT EQUAL)
+            debug
+            CALL UTIL_ERRORMSG USING "Bad File Found :: Check globs","PROCESS_REPORTS"
+        ENDIF
+        RESET W_INI_NAME
+
+        debug ...next file
+        CALL UTIL_XCOUNTER USING X_CNT1, REFRESH_RATE
+
+...process PDF file
+        SCAN "pdf" IN W_INI_NAME
+        IF (EQUAL)
+            RESET W_INI_NAME
+            CALL UTIL_XCOUNTER USING X_CNT4, REFRESH_RATE
+            CALL PACK_FILES_ARRAY USING EXT_PDF
+            CONTINUE
+        ENDIF
+
+... Found a csv. Need to rename?
+        SCAN ADD_STRING IN W_INI_NAME
+        IF (EQUAL)
+            RESET W_INI_NAME
+        ELSE
+            CALL RENAME_CSV USING W_INI_NAME,RPT_PATTERN@
+        ENDIF
+        CALL UTIL_XCOUNTER USING X_CNT2, REFRESH_RATE
+        CALL PACK_FILES_ARRAY USING EXT_CSV
+    REPEAT
+
+    CALL CLOSE_OGBFILE USING W_FILE_FD,W_FILE_NAME
+    ERASE W_FILE_NAME
+
+    debug
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+PACK_FILES_ARRAY LROUTINE FILETYPE@
+./* Increment the count and load the correct files array
+. */
+FILETYPE@       NUM     @
+...
+    ADD 1 TO FILE_COUNT[FILETYPE@]
+    PACK ALL_FILES[FILE_COUNT[FILETYPE@], FILETYPE@] WITH W_INI_NAME
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+RENAME_CSV LROUTINE NAME@,SEG_PATTERN@
+./* Insert the string segment into this name and rename the file
+. */
+NAME@           CHAR    @
+SEG_PATTERN@    CHAR    @
+BACK_PART       CHAR    200
+NEW_NAME        CHAR    200
+...
+    FILL " " IN NEW_NAME,BACK_PART
+    MOVE NAME@ TO NEW_NAME
+    SCAN SEG_PATTERN@ IN NEW_NAME
+
+    MOVE NEW_NAME TO BACK_PART
+    BUMP NEW_NAME BY -1
+    APPEND (ADD_STRING+BACK_PART) TO NEW_NAME
+    RESET NEW_NAME
+
+    PACK SCRATCH WITH "mv #"",WORK_DIR,"/",NAME@,"#" #"",WORK_DIR,"/",NEW_NAME,"#"",BLANKS
+    ROLLOUT SCRATCH
+    IF (OVER)
+        CALL UTIL_ERRORMSG USING "CSV Rename Bombed","RENAME_CSV"
+    ENDIF
+    MOVE NEW_NAME TO NAME@
+
+    CALL UTIL_XCOUNTER USING X_CNT3, REFRESH_RATE
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+MOVE_FILES LROUTINE
+./* Copy CSVs and PDFs to the Windows shared drive
+. */
+...
+    debug
+    CALL DO_FILEMOVES USING EXT_CSV, "ascii"
+    CALL DO_FILEMOVES USING EXT_PDF, "bin"
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+DO_EXPORT LROUTINE DEST_DIR@,FILES@,TRANSFER_TYPE@
+./* FTP files of a certain name to a certain directory using a certain
+. * type of transfer
+. */
+DEST_DIR@           CHAR    @
+FILES@              CHAR    @
+TRANSFER_TYPE@      CHAR    @
+...
+    PACK SCRATCH WITH FTP_SCRIPT:
+                      QUOTE,(CHOP DEST_DIR@),ENDQUOTE:
+                      QUOTE,(CHOP WORK_DIR),ENDQUOTE:
+                      QUOTE,(CHOP FILES@),ENDQUOTE:
+                      QUOTE,(CHOP TRANSFER_TYPE@),ENDQUOTE," > /dev/null",BLANKS
+    ROLLOUT SCRATCH
+    IF (OVER)
+        CALL UTIL_ERRORMSG USING ("FTP transfer bombed: "+WORK_DIR+"/"+FILES@+" to "+DEST_DIR@):
+                                  "DO_EXPORT"
+    ENDIF
+
+    CALL DO_LOG USING FILES@,("Exported to "+DEST_DIR@)
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+DO_ARCHIVE LROUTINE ARCHIVE_DIR@,FILES@
+./* Save the files on AIX /e/ area
+. */
+ARCHIVE_DIR@        CHAR    @
+FILES@              CHAR    @
+...
+    PACK SCRATCH WITH "cp ":
+                      QUOTE,(CHOP WORK_DIR),"/",FILES@,ENDQUOTE:
+                      QUOTE,(CHOP ARCHIVE_DIR@),"/",ENDQUOTE:
+                      BLANKS
+    ROLLOUT SCRATCH
+    IF (OVER)
+        CALL UTIL_ERRORMSG USING ("Archive bombed: "+WORK_DIR+"/"+FILES@+" to "+ARCHIVE_DIR@):
+                                  "DO_ARCHIVE"
+    ENDIF
+
+    CALL DO_LOG USING FILES@,("Archived in "+ARCHIVE_DIR@)
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+DO_LOG LROUTINE FILE@,ACTION@
+./* Log events
+. */
+FILE@           CHAR    @
+ACTION@         CHAR    @
+...
+    RETURN IF NOT (WRITE_LOG)
+
+    FILL " " IN LOG_REC
+    PACK LOG_REC WITH "#"",FILE@,"#"",COMMA,"#"",ACTION@,"#""
+    CALL WRITE_OGBREC USING LOG_FD, LOG_NAME, LOG_LIST
+
+    RETURN
+    ENDROUTINE
+
+
+.#######################################################################
+CLEAN_UP LROUTINE
+./* Clean up work files and staging directory
+. */
+        debug
+    PACK SCRATCH WITH "rm ",WORK_DIR,"/* 2>/dev/null && rmdir ",WORK_DIR,BLANKS
+    IF NOT (TST_ENABLE & TST_NODELETE)
+        ROLLOUT SCRATCH
+    ENDIF
+
+    ERASE W_FILE_NAME
+
+    IF (WRITE_LOG)
+        CALL CLOSE_OGBFILE USING LOG_FD, LOG_NAME
+    ENDIF
+
+    RETURN
+    ENDROUTINE
+
+
+.# =================================================================== #
+.# Routine Includes
+.# =================================================================== #
+    INC UTIL_COMMON.SR
+    INC UTIL_DATA.SR
+    INC UTIL_SYSTEM.SR
+
+.# =================================================================== #
+.# End Program
+.# =================================================================== #
